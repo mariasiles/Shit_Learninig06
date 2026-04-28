@@ -1,0 +1,40 @@
+============================================================
+1. MIDES GENERALS
+   Imatges úniques : 8091
+   Captions totals : 40455
+   Captions/imatge : 5.0
+
+2. SPLIT
+   Train :  6091 imatges  (75.3%)  → 30455 captions
+   Val   :  1000 imatges  (12.4%)  → 5000 captions
+   Test  :  1000 imatges  (12.4%)  → 5000 captions
+
+3. LONGITUD DE LES CAPTIONS (paraules)
+count    40455.00
+mean        10.82
+std          3.77
+min          1.00
+25%          8.00
+50%         10.00
+75%         13.00
+max         37.00
+
+4. VOCABULARI
+   Paraules úniques totals : 8493
+   Vocabulari (thresh≥5)   : 2982
+   Cobertura               : 97.9%
+   Top 10: ['a', 'in', 'the', 'on', 'is', 'and', 'dog', 'with', 'man', 'of']
+
+5. MIDES DE LES IMATGES (mostra 200)
+   Amplada — mitjana: 457px  min: 303  max: 500
+   Alçada  — mitjana: 394px  min: 200  max: 500
+
+6. DATALOADER (batch_size=32)
+   Train batches : 952
+   Val   batches : 157
+   Test  batches : 157
+   Shape imatges : (32, 3, 224, 224)  (B x C x H x W)
+   Shape captions: (32, 27)  (B x T_max)
+   Imatges normalitzades — min: -2.118  max: 2.640
+
+Gràfiques guardades a /home/edxnG06/Maria_Siles/projecte-deep-learning-06/checkpoints/dataset_analysis/
