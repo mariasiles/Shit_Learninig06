@@ -3,26 +3,14 @@ from __future__ import annotations
 
 import argparse
 import pickle
-import sys
 from pathlib import Path
-
-# Add project root to sys.path for portability
-root_dir = Path(__file__).resolve().parent.parent
-if str(root_dir) not in sys.path:
-    sys.path.insert(0, str(root_dir))
 
 import torch
 from PIL import Image
-from torchvision import transforms
 
-try:
-    from src.dataset import get_transform
-    from src.model import DecoderRNN, EncoderCNN
-    from src.vocabulary import Vocabulary
-except ImportError:
-    from dataset import get_transform
-    from model import DecoderRNN, EncoderCNN
-    from vocabulary import Vocabulary  # noqa: F401  (needed for pickle load)
+from src.dataset import get_transform
+from src.model import DecoderRNN, EncoderCNN
+from src.vocabulary import Vocabulary  # noqa: F401  (needed for pickle load)
 
 
 def load_checkpoint(ckpt_path: str, vocab_path: str, device: torch.device):
@@ -50,26 +38,14 @@ def caption_image(image_path: str, encoder, decoder, vocab, device) -> str:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--image", required=True, help="Ruta a la imatge a processar")
-    p.add_argument("--checkpoint", default=None, help="Ruta al checkpoint .pt (per defecte l'últim)")
-    p.add_argument("--vocab", default=str(root_dir / "data/flickr8k/vocab.pkl"), help="Ruta al vocabulari .pkl")
+    p.add_argument("--image", required=True)
+    p.add_argument("--checkpoint", required=True)
+    p.add_argument("--vocab", default="data/flickr8k/vocab.pkl")
     args = p.parse_args()
-
-    # Si no s'ha especificat checkpoint, busquem l'últim
-    if args.checkpoint is None:
-        ckpt_dir = root_dir / "checkpoints"
-        ckpts = sorted(list(ckpt_dir.glob("*.pt")), key=lambda x: x.stat().st_mtime)
-        if ckpts:
-            args.checkpoint = str(ckpts[-1])
-            print(f"[auto] Usant l'últim checkpoint trobat: {args.checkpoint}")
-        else:
-            print("ERROR: No s'ha trobat cap checkpoint a 'checkpoints/'")
-            sys.exit(1)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     encoder, decoder, vocab = load_checkpoint(args.checkpoint, args.vocab, device)
     cap = caption_image(args.image, encoder, decoder, vocab, device)
-    print(f"\nResultat:")
     print(f"{Path(args.image).name}: {cap}")
 
 

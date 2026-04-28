@@ -7,36 +7,26 @@ from __future__ import annotations
 
 import argparse
 import pickle
-import sys
 import time
 from pathlib import Path
 
-# Add project root to sys.path for portability
-root_dir = Path(__file__).resolve().parent.parent
-if str(root_dir) not in sys.path:
-    sys.path.insert(0, str(root_dir))
-
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence
 
-try:
-    from src.dataset import get_loaders
-    from src.model import DecoderRNN, EncoderCNN
-    from src.vocabulary import Vocabulary, build_vocab
-except ImportError:
-    from dataset import get_loaders
-    from model import DecoderRNN, EncoderCNN
-    from vocabulary import Vocabulary, build_vocab
+from src.dataset import get_loaders
+from src.model import DecoderRNN, EncoderCNN
+from src.vocabulary import Vocabulary, build_vocab
+
 
 def parse_args():
     p = argparse.ArgumentParser()
-    # Portability: use root_dir to set default paths
-    p.add_argument("--images-dir", default=str(root_dir / "dataset/Images"))
-    p.add_argument("--captions-csv", default=str(root_dir / "dataset/captions.txt"))
-    p.add_argument("--vocab-path", default=str(root_dir / "data/flickr8k/vocab.pkl"))
-    p.add_argument("--checkpoints-dir", default=str(root_dir / "checkpoints"))
+    p.add_argument("--images-dir", default="data/flickr8k/Images")
+    p.add_argument("--captions-csv", default="data/flickr8k/captions.txt")
+    p.add_argument("--vocab-path", default="data/flickr8k/vocab.pkl")
+    p.add_argument("--checkpoints-dir", default="checkpoints")
     p.add_argument("--vocab-threshold", type=int, default=5)
 
     p.add_argument("--embed-size", type=int, default=256)
@@ -52,15 +42,9 @@ def parse_args():
 
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--wandb-project", default="image-captioning")
-    p.add_argument("--wandb-entity", default="learning6")
+    p.add_argument("--wandb-entity", default=None)
     p.add_argument("--run-name", default=None)
-
-    args = p.parse_args()
-    
-    # Ensure checkpoints directory exists
-    Path(args.checkpoints_dir).mkdir(parents=True, exist_ok=True)
-    
-    return args
+    return p.parse_args()
 
 
 def get_or_build_vocab(args) -> Vocabulary:
@@ -124,13 +108,11 @@ def main():
     use_wandb = args.wandb
     if use_wandb:
         import wandb
-        wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            name=args.run_name,
-            config=vars(args)
-        )
+        wandb.init(project=args.wandb_project, entity=args.wandb_entity, name=args.run_name, config=vars(args))
         wandb.config.update({"vocab_size": len(vocab)})
+
+    train_losses: list[float] = []
+    val_losses: list[float] = []
 
     global_step = 0
     for epoch in range(1, args.epochs + 1):
@@ -151,6 +133,7 @@ def main():
             optimizer.step()
 
             global_step += 1
+            train_losses.append(loss.item())
             if i % args.log_step == 0:
                 ppl = float(np.exp(min(loss.item(), 20)))
                 print(f"epoch {epoch}/{args.epochs}  step {i}/{len(train_loader)}  "
@@ -160,6 +143,7 @@ def main():
                                "epoch": epoch, "step": global_step})
 
         val_loss = evaluate(encoder, decoder, val_loader, criterion, device)
+        val_losses.append(val_loss)
         val_ppl = float(np.exp(min(val_loss, 20)))
         elapsed = time.time() - t0
         print(f"== epoch {epoch} done  val_loss={val_loss:.4f}  val_ppl={val_ppl:.2f}  ({elapsed:.0f}s)")
@@ -176,6 +160,31 @@ def main():
         out = Path(args.checkpoints_dir) / f"ckpt_epoch{epoch}.pt"
         torch.save(ckpt, out)
         print(f"[ckpt] saved {out}")
+
+    # --- loss curve ---
+    steps_per_epoch = len(train_loader)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    axes[0].plot(train_losses, alpha=0.6, label="train (per batch)")
+    for e in range(1, args.epochs + 1):
+        axes[0].axvline(e * steps_per_epoch, color="gray", linestyle="--", linewidth=0.8)
+    axes[0].set_xlabel("batch")
+    axes[0].set_ylabel("cross-entropy loss")
+    axes[0].set_title("Train loss")
+    axes[0].legend()
+
+    axes[1].plot(range(1, args.epochs + 1), val_losses, marker="o", label="val")
+    axes[1].set_xlabel("epoch")
+    axes[1].set_ylabel("cross-entropy loss")
+    axes[1].set_title("Val loss per epoch")
+    axes[1].legend()
+
+    plt.tight_layout()
+    plot_path = Path(args.checkpoints_dir) / "loss_curve.png"
+    plt.savefig(plot_path, dpi=150)
+    plt.close()
+    print(f"[plot] saved {plot_path}")
+    # ------------------
 
     if use_wandb:
         wandb.finish()

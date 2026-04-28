@@ -16,10 +16,7 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
-try:
-    from src.vocabulary import Vocabulary
-except ImportError:
-    from vocabulary import Vocabulary
+from src.vocabulary import Vocabulary
 
 
 # Standard ImageNet normalization (because the encoder is a ResNet pretrained on ImageNet)
