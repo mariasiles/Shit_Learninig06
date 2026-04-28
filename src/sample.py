@@ -50,14 +50,26 @@ def caption_image(image_path: str, encoder, decoder, vocab, device) -> str:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--image", required=True)
-    p.add_argument("--checkpoint", required=True)
-    p.add_argument("--vocab", default="data/flickr8k/vocab.pkl")
+    p.add_argument("--image", required=True, help="Ruta a la imatge a processar")
+    p.add_argument("--checkpoint", default=None, help="Ruta al checkpoint .pt (per defecte l'últim)")
+    p.add_argument("--vocab", default=str(root_dir / "data/flickr8k/vocab.pkl"), help="Ruta al vocabulari .pkl")
     args = p.parse_args()
+
+    # Si no s'ha especificat checkpoint, busquem l'últim
+    if args.checkpoint is None:
+        ckpt_dir = root_dir / "checkpoints"
+        ckpts = sorted(list(ckpt_dir.glob("*.pt")), key=lambda x: x.stat().st_mtime)
+        if ckpts:
+            args.checkpoint = str(ckpts[-1])
+            print(f"[auto] Usant l'últim checkpoint trobat: {args.checkpoint}")
+        else:
+            print("ERROR: No s'ha trobat cap checkpoint a 'checkpoints/'")
+            sys.exit(1)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     encoder, decoder, vocab = load_checkpoint(args.checkpoint, args.vocab, device)
     cap = caption_image(args.image, encoder, decoder, vocab, device)
+    print(f"\nResultat:")
     print(f"{Path(args.image).name}: {cap}")
 
 

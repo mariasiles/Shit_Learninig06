@@ -32,10 +32,11 @@ except ImportError:
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--images-dir", default="data/flickr8k/Images")
-    p.add_argument("--captions-csv", default="data/flickr8k/captions.txt")
-    p.add_argument("--vocab-path", default="data/flickr8k/vocab.pkl")
-    p.add_argument("--checkpoints-dir", default="checkpoints")
+    # Portability: use root_dir to set default paths
+    p.add_argument("--images-dir", default=str(root_dir / "dataset/Images"))
+    p.add_argument("--captions-csv", default=str(root_dir / "dataset/captions.txt"))
+    p.add_argument("--vocab-path", default=str(root_dir / "data/flickr8k/vocab.pkl"))
+    p.add_argument("--checkpoints-dir", default=str(root_dir / "checkpoints"))
     p.add_argument("--vocab-threshold", type=int, default=5)
 
     p.add_argument("--embed-size", type=int, default=256)
@@ -51,8 +52,15 @@ def parse_args():
 
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--wandb-project", default="image-captioning")
+    p.add_argument("--wandb-entity", default="learning6")
     p.add_argument("--run-name", default=None)
-    return p.parse_args()
+
+    args = p.parse_args()
+    
+    # Ensure checkpoints directory exists
+    Path(args.checkpoints_dir).mkdir(parents=True, exist_ok=True)
+    
+    return args
 
 
 def get_or_build_vocab(args) -> Vocabulary:
@@ -116,7 +124,12 @@ def main():
     use_wandb = args.wandb
     if use_wandb:
         import wandb
-        wandb.init(project=args.wandb_project, name=args.run_name, config=vars(args))
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.run_name,
+            config=vars(args)
+        )
         wandb.config.update({"vocab_size": len(vocab)})
 
     global_step = 0
