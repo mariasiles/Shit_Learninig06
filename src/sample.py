@@ -3,14 +3,26 @@ from __future__ import annotations
 
 import argparse
 import pickle
+import sys
 from pathlib import Path
+
+# Add project root to sys.path for portability
+root_dir = Path(__file__).resolve().parent.parent
+if str(root_dir) not in sys.path:
+    sys.path.insert(0, str(root_dir))
 
 import torch
 from PIL import Image
+from torchvision import transforms
 
-from src.dataset import get_transform
-from src.model import DecoderRNN, EncoderCNN
-from src.vocabulary import Vocabulary  # noqa: F401  (needed for pickle load)
+try:
+    from src.dataset import get_transform
+    from src.model import DecoderRNN, EncoderCNN
+    from src.vocabulary import Vocabulary
+except ImportError:
+    from dataset import get_transform
+    from model import DecoderRNN, EncoderCNN
+    from vocabulary import Vocabulary  # noqa: F401  (needed for pickle load)
 
 
 def load_checkpoint(ckpt_path: str, vocab_path: str, device: torch.device):

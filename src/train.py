@@ -7,18 +7,28 @@ from __future__ import annotations
 
 import argparse
 import pickle
+import sys
 import time
 from pathlib import Path
+
+# Add project root to sys.path for portability
+root_dir = Path(__file__).resolve().parent.parent
+if str(root_dir) not in sys.path:
+    sys.path.insert(0, str(root_dir))
 
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence
 
-from src.dataset import get_loaders
-from src.model import DecoderRNN, EncoderCNN
-from src.vocabulary import Vocabulary, build_vocab
-
+try:
+    from src.dataset import get_loaders
+    from src.model import DecoderRNN, EncoderCNN
+    from src.vocabulary import Vocabulary, build_vocab
+except ImportError:
+    from dataset import get_loaders
+    from model import DecoderRNN, EncoderCNN
+    from vocabulary import Vocabulary, build_vocab
 
 def parse_args():
     p = argparse.ArgumentParser()
