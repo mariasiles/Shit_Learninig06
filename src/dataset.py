@@ -33,7 +33,7 @@ def get_transform(image_size: int = 224, train: bool = True): # retorna les tran
             transforms.Resize(256), # redimensiona mantenint la proporció perquè el costat curt tingui 256 píxels
             transforms.RandomCrop(image_size), # retalla aleatòriament un quadrat de 224x224 píxels --> data augmentation (cada vegada pot veure un tros diferent de la imatge)
             transforms.RandomHorizontalFlip(), # gira la imatge horitzontalment 50% de les vegades --> gos mirant dreta o esquerra
-            transforms.ToTensor(), # passem de PIL Image (amb valors de 0 - 255) a Tensor de PyTorch [2, 244, 224] amb valors entre 0 i 1
+            transforms.ToTensor(), # passem de PIL Image (amb valors de 0 - 255) a Tensor de PyTorch [3, 244, 224] amb valors entre 0 i 1
             transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD), # normalitza cada canal amb la mitjana i desviació d'ImageNet
         ])                                                     # ara tenim valors centrats al voltant de 0 (ja no de 0 a 1)
     return transforms.Compose([ # en el cas de validació/test no fa transformaicions aleatòries, només les necessaries per preparar per la ResNet
