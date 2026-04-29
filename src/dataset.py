@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader, Dataset # dues classes de PyTorch
                 # DataLoader agafa un Dataset i crea batches automàticament
 from torchvision import transforms # importa transformacions d'imatge predefinides
 
-from src.vocabulary import Vocabulary # la classe Vocabulary del fitxer anterior
+from vocabulary import Vocabulary # la classe Vocabulary del fitxer anterior
 
 # Constants de normalització d'ImageNet (perquè l'encoder és un ResNet preentrenat amb ImageNet)
 # les imatges s'han de ppreparar igual que les imatges amb què va ser entrenada la ResNet
