@@ -1,5 +1,4 @@
-"""BLEU evaluation on N random test images, logged to wandb."""
-import random
+"""BLEU evaluation on the full test set, logged to wandb."""
 import pandas as pd
 import torch
 import wandb
@@ -9,33 +8,30 @@ from src.dataset import split_image_ids
 from src.sample import caption_image, load_checkpoint
 from src.vocabulary import simple_tokenize
 
-CHECKPOINT   = "checkpoints/ckpt_epoch5.pt"
+CHECKPOINT   = "checkpoints/ckpt_best.pt"
 VOCAB_PATH   = "data/flickr8k/vocab.pkl"
 IMAGES_DIR   = "data/flickr8k/Images"
 CAPTIONS_CSV = "data/flickr8k/captions.txt"
-N    = 5
-SEED = 42
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 encoder, decoder, vocab = load_checkpoint(CHECKPOINT, VOCAB_PATH, device)
 
 _, _, test_ids = split_image_ids(CAPTIONS_CSV)
-random.seed(SEED)
-sampled = random.sample(test_ids, N)
 
 df = pd.read_csv(CAPTIONS_CSV)
 smooth = SmoothingFunction().method1
 
 run = wandb.init(entity="learning6", project="image-captioning",
-                 name="bleu-eval-5images", config={"n_images": N, "seed": SEED})
+                 name="bleu-eval-fulltest", config={"n_images": len(test_ids), "checkpoint": CHECKPOINT})
 
 all_refs, all_hyps = [], []
 table = wandb.Table(columns=["image", "generated_caption", "reference_captions", "BLEU-1", "BLEU-4"])
 
+print(f"Evaluating {len(test_ids)} test images...")
 print(f"{'Image':<35} {'BLEU-1':>7} {'BLEU-4':>7}  Caption")
 print("-" * 100)
 
-for img in sampled:
+for img in test_ids:
     refs = [simple_tokenize(c) for c in df[df["image"] == img]["caption"].tolist()]
     hyp  = simple_tokenize(caption_image(f"{IMAGES_DIR}/{img}", encoder, decoder, vocab, device))
 

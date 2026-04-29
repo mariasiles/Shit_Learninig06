@@ -42,20 +42,21 @@ class DecoderRNN(nn.Module):
     """LSTM decoder conditioned on image features (fed once as the first input)."""
 
     def __init__(self, embed_size: int, hidden_size: int, vocab_size: int,
-                 num_layers: int = 1, max_seq_length: int = 20):
+                 num_layers: int = 1, max_seq_length: int = 20, dropout: float = 0.5):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, embed_size)
+        self.dropout = nn.Dropout(dropout)
         self.lstm = nn.LSTM(embed_size, hidden_size, num_layers, batch_first=True)
         self.linear = nn.Linear(hidden_size, vocab_size)
         self.max_seq_length = max_seq_length
 
     def forward(self, features: torch.Tensor, captions: torch.Tensor, lengths: list[int]):
-        embeddings = self.embed(captions)
+        embeddings = self.dropout(self.embed(captions))
         embeddings = torch.cat((features.unsqueeze(1), embeddings), dim=1)
         # captions already include <start>; lengths are full caption lengths
         packed = pack_padded_sequence(embeddings, lengths, batch_first=True)
         hiddens, _ = self.lstm(packed)
-        outputs = self.linear(hiddens.data)
+        outputs = self.linear(self.dropout(hiddens.data))
         return outputs
 
     @torch.no_grad()

@@ -32,9 +32,11 @@ def parse_args():
     p.add_argument("--embed-size", type=int, default=256)
     p.add_argument("--hidden-size", type=int, default=512)
     p.add_argument("--num-layers", type=int, default=1)
+    p.add_argument("--dropout", type=float, default=0.5)
     p.add_argument("--backbone", default="resnet50")
 
     p.add_argument("--epochs", type=int, default=5)
+    p.add_argument("--patience", type=int, default=5)
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--lr", type=float, default=1e-3)
@@ -95,7 +97,7 @@ def main():
     print(f"[data] train batches={len(train_loader)}  val batches={len(val_loader)}")
 
     encoder = EncoderCNN(args.embed_size, backbone=args.backbone).to(device)
-    decoder = DecoderRNN(args.embed_size, args.hidden_size, len(vocab), args.num_layers).to(device)
+    decoder = DecoderRNN(args.embed_size, args.hidden_size, len(vocab), args.num_layers, dropout=args.dropout).to(device)
 
     criterion = nn.CrossEntropyLoss()
     params = (
@@ -114,6 +116,8 @@ def main():
     train_losses: list[float] = []
     val_losses: list[float] = []
 
+    best_val_loss = float("inf")
+    patience_counter = 0
     global_step = 0
     for epoch in range(1, args.epochs + 1):
         encoder.train()
@@ -160,6 +164,19 @@ def main():
         out = Path(args.checkpoints_dir) / f"ckpt_epoch{epoch}.pt"
         torch.save(ckpt, out)
         print(f"[ckpt] saved {out}")
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            best_out = Path(args.checkpoints_dir) / "ckpt_best.pt"
+            torch.save(ckpt, best_out)
+            print(f"[early_stop] new best val_loss={best_val_loss:.4f} -> saved ckpt_best.pt")
+        else:
+            patience_counter += 1
+            print(f"[early_stop] no improvement ({patience_counter}/{args.patience})")
+            if patience_counter >= args.patience:
+                print(f"[early_stop] patience exhausted, stopping at epoch {epoch}")
+                break
 
     # --- loss curve ---
     steps_per_epoch = len(train_loader)
