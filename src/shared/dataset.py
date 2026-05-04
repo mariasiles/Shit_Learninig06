@@ -1,10 +1,14 @@
-"""Flickr8k Dataset and DataLoader (PyTorch).
+"""Flickr8k / Flickr30k Dataset and DataLoader (PyTorch).
 
 Expected folder structure::
 
-    data/flickr8k/
+    Flickr8k:
         Images/         # all .jpg files
-        captions.txt    # CSV with header: image,caption
+        captions.txt    # CSV: image,caption
+
+    Flickr30k:
+        flickr30k_images/   # all .jpg files
+        results.csv         # CSV: image_name| comment_number| comment
 """
 from __future__ import annotations # per anotacions modernes com: list[str]
 
@@ -18,7 +22,34 @@ from torch.utils.data import DataLoader, Dataset # dues classes de PyTorch
                 # DataLoader agafa un Dataset i crea batches automàticament
 from torchvision import transforms # importa transformacions d'imatge predefinides
 
-from vocabulary import Vocabulary # la classe Vocabulary del fitxer anterior
+from src.shared.vocabulary import Vocabulary # la classe Vocabulary del fitxer anterior
+
+
+def load_captions_df(captions_csv: str | Path) -> pd.DataFrame:
+    """Llegeix un CSV de captions i retorna sempre un DataFrame amb columnes 'image' i 'caption'.
+
+    Suporta dos formats:
+      - Flickr8k:  separador ',',  columnes: image, caption
+      - Flickr30k: separador '|', columnes: image_name, comment_number, comment
+    """
+    captions_csv = Path(captions_csv)
+    # Detecta format llegint la primera línia
+    with open(captions_csv, encoding="utf-8") as f:
+        header = f.readline()
+
+    if "|" in header:  # Flickr30k
+        df = pd.read_csv(captions_csv, sep="|", skipinitialspace=True)
+        df.columns = [c.strip() for c in df.columns]
+        df = df.rename(columns={"image_name": "image", "comment": "caption"})
+        df = df[["image", "caption"]].copy()
+        df["image"] = df["image"].str.strip()
+        df["caption"] = df["caption"].astype(str).str.strip()
+    else:  # Flickr8k
+        df = pd.read_csv(captions_csv)
+        df = df[["image", "caption"]].copy()
+
+    return df.reset_index(drop=True)
+
 
 # Constants de normalització d'ImageNet (perquè l'encoder és un ResNet preentrenat amb ImageNet)
 # les imatges s'han de ppreparar igual que les imatges amb què va ser entrenada la ResNet
@@ -66,8 +97,8 @@ class Flickr8kDataset(Dataset):
         self.transform = transform if transform is not None else get_transform(train=False)
         # si no s'especifica cap transformació, per defecte no fa random crop ni flip, només les necessaries per la ResNet
 
-        df = pd.read_csv(captions_csv) # llegeix el CSV de captions amb pandas
-        if image_ids is not None: # si s'especifica una llista d'imatges, fa un dataset amb només aquestes imatges
+        df = load_captions_df(captions_csv)  # llegeix i normalitza Flickr8k o Flickr30k
+        if image_ids is not None:
             df = df[df["image"].isin(set(image_ids))].reset_index(drop=True)
         self.df = df
 
@@ -110,7 +141,7 @@ def split_image_ids(captions_csv: str | Path, val_size: int = 1000, test_size: i
     """Split unique image filenames into train/val/test (Karpathy-style)."""
     import numpy as np
 
-    df = pd.read_csv(captions_csv)
+    df = load_captions_df(captions_csv)
     unique = sorted(df["image"].unique().tolist()) # divideix per imatges úniques, no per captions (si no una caption estaria al train i laltra al test)
     rng = np.random.default_rng(seed) # generador aleatòri de numpy amb llavor fixa (sempre obtindrem la mateixa divisió --> bo per comparar experiments)
     rng.shuffle(unique) # barrega imatges
