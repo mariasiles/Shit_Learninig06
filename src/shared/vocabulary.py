@@ -6,7 +6,6 @@ import re # per a la funció simple_tokenize, que utilitza re per a tokenitzar e
 from collections import Counter # counter de freqs: Counter(["dog","cat","dog"]) --> Counter({"dog":2,"cat":1})
 from pathlib import Path # per rutes de fitxers de manera neta 
 
-import numpy as np # per crear la matriu d'embeddings de GloVe
 import pandas as pd # per llegir el CSV de captions i processar-lo com a DataFrame
 
 # Special tokens
@@ -26,10 +25,6 @@ class Vocabulary:
         self.idx = 0 # comptador d'índex. Comença a 0.
         for tok in (PAD, START, END, UNK):
             self.add_word(tok) # {"<pad>": 0, "<start>": 1, "<end>": 2, "<unk>": 3}
-
-        # Matriu d'embeddings GloVe (opcional). Omple's amb build_vocab_glove().
-        # Si és None, el model usarà embeddings aleatoris entrenables (mode estàndard).
-        self.glove_embeddings: np.ndarray | None = None
 
     def add_word(self, word: str) -> None:
         if word not in self.word2idx: # si paraula no està al vocabulari, l'afegeix
@@ -62,13 +57,77 @@ class Vocabulary:
         return " ".join(words) # les uneix amb espais
 
 
-# =============================================================================
-# OPCIÓ 1 — Vocabulari estàndard (sense semàntica)
-# Cada paraula rep un índex numèric basat en freqüència d'aparició.
-# "gat" i "felí" seran dos nombres sense cap relació entre ells.
-# =============================================================================
+def load_glove_weights(glove_path: str | Path, vocab: Vocabulary) -> tuple["torch.Tensor", int]:
+    """Carrega vectors GloVe i construeix una matriu de pesos per al vocabulari.
 
-def build_vocab(captions_csv: str | Path, threshold: int = 5) -> Vocabulary: 
+    Les paraules del vocabulari que no apareixen a GloVe s'inicialitzen aleatòriament.
+    Retorna (weight_matrix [vocab_size, glove_dim], glove_dim).
+
+    Descàrrega GloVe: https://nlp.stanford.edu/data/glove.6B.zip
+    Recomanat: glove.6B.300d.txt
+    """
+    import torch
+
+    print(f"[glove] carregant {glove_path}...")
+    glove: dict[str, list[float]] = {}
+    with open(glove_path, encoding="utf-8") as f:
+        for line in f:
+            parts = line.split()
+            glove[parts[0]] = [float(x) for x in parts[1:]]
+
+    glove_dim = len(next(iter(glove.values())))  # detecta la dimensió automàticament (50, 100, 200 o 300)
+    found, total = 0, len(vocab)
+
+    # matriu de pesos inicialitzada aleatòriament per a les paraules fora de GloVe
+    weights = torch.randn(total, glove_dim) * 0.01
+    weights[0] = 0  # <pad> → vector zero
+
+    for word, idx in vocab.word2idx.items():
+        if word in glove:
+            weights[idx] = torch.tensor(glove[word])
+            found += 1
+
+    print(f"[glove] {found}/{total} paraules del vocabulari trobades a GloVe ({glove_dim}d)")
+    return weights, glove_dim
+
+
+def load_word2vec_weights(w2v_path: str | Path, vocab: Vocabulary, binary: bool | None = None) -> tuple["torch.Tensor", int]:
+    """Carrega vectors Word2Vec i construeix una matriu de pesos per al vocabulari.
+
+    Les paraules del vocabulari que no apareixen a Word2Vec s'inicialitzen aleatòriament.
+    Retorna (weight_matrix [vocab_size, w2v_dim], w2v_dim).
+
+    Requereix: pip install gensim
+    Formats suportats:
+      - Binari (.bin): GoogleNews-vectors-negative300.bin
+      - Text (.txt):   capçalera "vocab_size dim" + una paraula per línia
+    """
+    import torch
+    from gensim.models import KeyedVectors
+
+    w2v_path = Path(w2v_path)
+    if binary is None:
+        binary = w2v_path.suffix == ".bin"
+
+    print(f"[word2vec] carregant {w2v_path} (binary={binary})...")
+    wv = KeyedVectors.load_word2vec_format(str(w2v_path), binary=binary)
+
+    w2v_dim = wv.vector_size
+    found, total = 0, len(vocab)
+
+    weights = torch.randn(total, w2v_dim) * 0.01
+    weights[0] = 0  # <pad> → vector zero
+
+    for word, idx in vocab.word2idx.items():
+        if word in wv:
+            weights[idx] = torch.tensor(wv[word])
+            found += 1
+
+    print(f"[word2vec] {found}/{total} paraules del vocabulari trobades a Word2Vec ({w2v_dim}d)")
+    return weights, w2v_dim
+
+
+def build_vocab(captions_csv: str | Path, threshold: int = 5) -> Vocabulary:
     df = pd.read_csv(captions_csv)
     counter: Counter[str] = Counter() # crea un counter buit
     for cap in df["caption"].astype(str):
@@ -81,115 +140,17 @@ def build_vocab(captions_csv: str | Path, threshold: int = 5) -> Vocabulary:
     return vocab
 
 
-# =============================================================================
-# OPCIÓ 2 — Vocabulari amb GloVe (amb semàntica)
-# Cada paraula rep un vector de 50/100/200/300 dimensions preentrenat amb GloVe.
-# "gat" i "felí" tindran vectors molt similars perquè apareixen en contextos similars.
-#
-# Com funciona GloVe?
-#   - Entrenat sobre milers de milions de paraules de text
-#   - Paraules que apareixen en contextos similars → vectors similars
-#   - Similitud cosinus entre vectors ≈ similitud semàntica
-#
-# El fitxer glove_path ha de ser el .txt descarregat de:
-#   https://nlp.stanford.edu/projects/glove/  (glove.6B.zip → glove.6B.300d.txt)
-# =============================================================================
-
-def build_vocab_glove(captions_csv: str | Path,
-                      glove_path: str | Path,
-                      threshold: int = 5,
-                      glove_dim: int = 300) -> Vocabulary:
-    """
-    Construeix el vocabulari igual que build_vocab(), però a més carrega
-    els vectors GloVe per a cada paraula i els guarda a vocab.glove_embeddings.
-
-    Retorna un Vocabulary amb:
-      - word2idx / idx2word  (igual que l'opció estàndard)
-      - glove_embeddings: np.ndarray de forma (vocab_size, glove_dim)
-        que el model pot usar per inicialitzar la capa nn.Embedding
-    """
-
-    # --- Pas 1: construïm el vocabulari de la mateixa manera que build_vocab ---
-    df = pd.read_csv(captions_csv)
-    counter: Counter[str] = Counter()
-    for cap in df["caption"].astype(str):
-        counter.update(simple_tokenize(cap)) # comptador de freqüències de paraules
-
-    vocab = Vocabulary() # inicia amb els 4 tokens especials (<pad>, <start>, <end>, <unk>)
-    for word, count in counter.items():
-        if count >= threshold: # només afegeix paraules que apareixen prou vegades
-            vocab.add_word(word)
-
-    # --- Pas 2: llegim el fitxer GloVe i guardem els vectors en un diccionari ---
-    print(f"Carregant GloVe des de {glove_path} ...")
-    glove_vectors: dict[str, np.ndarray] = {} # {"dog": array([0.1, -0.3, ...]), ...}
-    with open(glove_path, "r", encoding="utf-8") as f:
-        for line in f:
-            parts = line.split() # cada línia: "dog 0.1 -0.3 0.7 ..."
-            word = parts[0]
-            vector = np.array(parts[1:], dtype=np.float32) # converteix els números a float
-            glove_vectors[word] = vector # guarda el vector per a la paraula
-
-    # --- Pas 3: construïm la matriu d'embeddings alineada amb el nostre vocabulari ---
-    # Mida: (nombre de paraules al vocab, dimensió GloVe)
-    # Inicialitzem amb zeros. Les paraules sense GloVe quedaran a zero (el model les aprendrà).
-    embedding_matrix = np.zeros((len(vocab), glove_dim), dtype=np.float32)
-
-    n_found = 0 # comptador de paraules trobades a GloVe
-    for word, idx in vocab.word2idx.items():
-        if word in glove_vectors: # si la paraula té vector GloVe, l'inserim a la matriu
-            embedding_matrix[idx] = glove_vectors[word]
-            n_found += 1
-        # si no hi és (paraula rara o token especial), deixem el vector a zeros
-
-    coverage = n_found / len(vocab) * 100 # % de paraules del vocab cobertes per GloVe
-    print(f"GloVe cobreix {n_found}/{len(vocab)} paraules del vocab ({coverage:.1f}%)")
-
-    # Guardem la matriu dins el vocabulari perquè el model la pugui usar directament
-    vocab.glove_embeddings = embedding_matrix # shape: (vocab_size, glove_dim)
-
-    return vocab
-
-
-# =============================================================================
-# COM USAR ELS EMBEDDINGS GLOVE AL MODEL (exemple per al fitxer model.py)
-# =============================================================================
-#
-#   vocab = build_vocab_glove("captions.csv", "glove.6B.300d.txt", glove_dim=300)
-#
-#   import torch
-#   glove_tensor = torch.tensor(vocab.glove_embeddings)  # (vocab_size, 300)
-#
-#   self.embedding = nn.Embedding(len(vocab), embed_dim)
-#   self.embedding.weight = nn.Parameter(glove_tensor)   # inicialitza amb GloVe
-#   self.embedding.weight.requires_grad = True            # True = fine-tuning (recomanat)
-#                                                         # False = vectors fixos
-#
-# =============================================================================
-
-
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--captions", default="data/flickr8k/captions.txt") # ruta al csv de captions
     p.add_argument("--out", default="data/flickr8k/vocab.pkl") # ruta on guardar el vocab entrenat en un .pkl
     p.add_argument("--threshold", type=int, default=5) # per definir un altre threshold que no sigui 5
-    # --glove: si s'especifica, usa GloVe. Si no, usa l'opció estàndard sense semàntica.
-    p.add_argument("--glove", default=None, help="Ruta al fitxer GloVe (ex: glove.6B.300d.txt). Si no s'especifica, usa vocabulari estàndard.")
-    p.add_argument("--glove_dim", type=int, default=300, help="Dimensió dels vectors GloVe (50, 100, 200 o 300)") # ha de coincidir amb el fitxer
     args = p.parse_args() 
 
-    if args.glove:
-        # OPCIÓ 2: vocabulari amb embeddings semàntics GloVe
-        vocab = build_vocab_glove(args.captions, args.glove, args.threshold, args.glove_dim)
-        print(f"Mode: GloVe (dim={args.glove_dim})")
-    else:
-        # OPCIÓ 1: vocabulari estàndard (índexs numèrics sense semàntica)
-        vocab = build_vocab(args.captions, args.threshold)
-        print("Mode: estàndard (sense GloVe)")
-
+    vocab = build_vocab(args.captions, args.threshold) # construeix vocabulari a partir del csv i threshold
     Path(args.out).parent.mkdir(parents=True, exist_ok=True) # crea carpeta on guardar el vocab si no existeix
     with open(args.out, "wb") as f: # obre en mode escriptura binària
-        pickle.dump(vocab, f) # guarda vocab al fitxer (inclou glove_embeddings si s'ha usat GloVe)
+        pickle.dump(vocab, f) # guarda vocab al fitxer
     print(f"Vocab size: {len(vocab)} (threshold={args.threshold})") # imprimeix mida del vocabulari i threshold utilitzat
     print(f"Saved to {args.out}") # imprimeix ruta on s'ha guardat el vocabulari
 
