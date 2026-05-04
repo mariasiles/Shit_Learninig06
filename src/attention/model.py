@@ -71,6 +71,7 @@ class AttentionDecoder(nn.Module):
         attention_dim: int = 256,
         dropout: float = 0.5,
         max_seq_length: int = 20,
+        pretrained_embeddings: torch.Tensor | None = None, # opcional: matriu GloVe (vocab_size, embed_size)
     ):
         super().__init__()
         self.encoder_dim = encoder_dim
@@ -80,6 +81,12 @@ class AttentionDecoder(nn.Module):
 
         self.attention = Attention(encoder_dim, hidden_size, attention_dim)
         self.embed = nn.Embedding(vocab_size, embed_size)
+
+        # Si es passen embeddings preentrenats (GloVe), inicialitzem la matriu de pesos.
+        # Permet que el decoder comenci amb representació semàntica en lloc d'una aleatòria.
+        if pretrained_embeddings is not None:
+            self.embed.weight = nn.Parameter(pretrained_embeddings) # sobreescriu la matriu aleatòria amb els vectors GloVe
+            self.embed.weight.requires_grad = True               # True = fine-tuning (els vectors s'ajusten durant l'entrenament)
         self.dropout = nn.Dropout(dropout)
         self.lstm_cell = nn.LSTMCell(embed_size + encoder_dim, hidden_size)
         self.init_h = nn.Linear(encoder_dim, hidden_size)

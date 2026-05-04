@@ -18,7 +18,7 @@ from torch.nn.utils.rnn import pack_padded_sequence
 
 from src.shared.dataset import get_loaders
 from src.attention.model import AttentionDecoder, EncoderCNNAttention
-from src.shared.vocabulary import Vocabulary, build_vocab
+from src.shared.vocabulary import Vocabulary, build_vocab, build_vocab_glove
 
 
 def parse_args():
@@ -34,6 +34,10 @@ def parse_args():
     p.add_argument("--attention-dim", type=int, default=256)
     p.add_argument("--dropout", type=float, default=0.5)
     p.add_argument("--backbone", default="resnet50")
+
+    # Opcions GloVe (si no s'especifiquen, s'usa vocabulari estàndard sense semàntica)
+    p.add_argument("--glove", default=None, help="Ruta al fitxer GloVe .txt (ex: glove.6B.300d.txt). Si no s'especifica, s'usa embedding estàndard.")
+    p.add_argument("--glove-dim", type=int, default=300, help="Dimensió dels vectors GloVe (50, 100, 200 o 300). Ha de coincidir amb el fitxer.")
 
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--patience", type=int, default=5)
@@ -53,11 +57,27 @@ def get_or_build_vocab(args) -> Vocabulary:
     vp = Path(args.vocab_path)
     if vp.exists():
         with open(vp, "rb") as f:
-            return pickle.load(f)
-    vocab = build_vocab(args.captions_csv, threshold=args.vocab_threshold)
+            vocab = pickle.load(f)
+        # Si s'ha demanat GloVe però el vocab carregat no en té, el reconstruïm
+        if args.glove and vocab.glove_embeddings is None:
+            print(f"[vocab] el vocab existent no té GloVe. Reconstruint amb GloVe...")
+        else:
+            return vocab # vocab ja és correcte
+
+    # Construïm el vocabulari: estàndard o amb GloVe segons els arguments
+    if args.glove:
+        # OPCIÓ GloVe: cada paraula tindrà un vector semàntic preentrenat
+        # Nota: --embed-size s'ha d'igualar a --glove-dim perquè les dimensions concordin
+        vocab = build_vocab_glove(args.captions_csv, args.glove,
+                                  threshold=args.vocab_threshold,
+                                  glove_dim=args.glove_dim)
+    else:
+        # OPCIÓ estàndard: cada paraula rep un índex numèric sense semàntica
+        vocab = build_vocab(args.captions_csv, threshold=args.vocab_threshold)
+
     vp.parent.mkdir(parents=True, exist_ok=True)
     with open(vp, "wb") as f:
-        pickle.dump(vocab, f)
+        pickle.dump(vocab, f) # el guarda (inclou glove_embeddings si s'ha usat GloVe)
     print(f"[vocab] built and saved to {vp} (size={len(vocab)})")
     return vocab
 
@@ -99,6 +119,14 @@ def main():
     print(f"[data] train batches={len(train_loader)}  val batches={len(val_loader)}")
 
     encoder = EncoderCNNAttention(backbone=args.backbone).to(device)
+
+    # Si s'ha construït un vocab amb GloVe, passem la matriu d'embeddings al decoder.
+    # El decoder inicialitzarà la seva capa Embedding amb vectors semàntics en lloc d'aleatoris.
+    glove_tensor = None
+    if vocab.glove_embeddings is not None:
+        glove_tensor = torch.tensor(vocab.glove_embeddings) # converteix la matriu numpy a tensor de PyTorch
+        print(f"[glove] embeddings carregats: {glove_tensor.shape}") # (vocab_size, glove_dim)
+
     decoder = AttentionDecoder(
         encoder_dim=encoder.encoder_dim,
         embed_size=args.embed_size,
@@ -106,6 +134,7 @@ def main():
         vocab_size=len(vocab),
         attention_dim=args.attention_dim,
         dropout=args.dropout,
+        pretrained_embeddings=glove_tensor, # None si no s'usa GloVe
     ).to(device)
 
     criterion = nn.CrossEntropyLoss()
