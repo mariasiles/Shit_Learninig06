@@ -8,9 +8,9 @@ from pathlib import Path
 import torch
 from PIL import Image
 
-from dataset import get_transform # per fer les transformacions de la imatge
-from model import DecoderRNN, EncoderCNN 
-from vocabulary import Vocabulary  # noqa: F401  (needed for pickle load)
+from src.shared.dataset import get_transform # per fer les transformacions de la imatge
+from src.baseline.model import DecoderRNN, EncoderCNN
+from src.shared.vocabulary import Vocabulary  # noqa: F401  (needed for pickle load)
 
 
 def load_checkpoint(ckpt_path: str, vocab_path: str, device: torch.device):
