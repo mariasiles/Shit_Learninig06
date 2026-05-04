@@ -47,17 +47,16 @@ class DecoderRNN(nn.Module):
 
     def __init__(self, embed_size: int, hidden_size: int, vocab_size: int,
                  num_layers: int = 1, max_seq_length: int = 20, dropout: float = 0.5,
-                 pretrained_embeddings: torch.Tensor | None = None): # opcional: matriu GloVe (vocab_size, embed_size)
-        # en ordre: mida vector característiques (i dels embeddings de les paraules), mida de l'estat ocult, num de tokens del vocabulari, nombre de capes de l'LSTM apilades (profunditat), longitud màxima de les captions generades
+                 pretrained_weights: "torch.Tensor | None" = None, freeze_embeddings: bool = False):
+        # pretrained_weights: matriu [vocab_size, embed_size] de GloVe (o None per inicialització aleatòria)
+        # freeze_embeddings: si True, els pesos de l'embedding no s'actualitzen durant l'entrenament
         super().__init__()
         self.embed = nn.Embedding(vocab_size, embed_size) # crea una capa d'embedding que converteix els ids de les paraules (de 0 a vocab_size-1) en vectors d'embedding de mida embed_size: [B, T] -> [B, T, embed_size]
                                                           # internament conté una matriu (p.ex. [2980, 256]) on cada fila és el vector d'una paraula.
-
-        # Si es passen embeddings preentrenats (GloVe), inicialitzem la matriu de pesos de la capa d'embedding.
-        # Amb requires_grad=True el model podrà ajustar els vectors durant l'entrenament (fine-tuning).
-        if pretrained_embeddings is not None:
-            self.embed.weight = nn.Parameter(pretrained_embeddings) # sobreescriu la matriu aleatòria amb els vectors GloVe
-            self.embed.weight.requires_grad = True               # True = fine-tuning (els vectors s'ajusten durant l'entrenament)
+        if pretrained_weights is not None:
+            self.embed.weight = nn.Parameter(pretrained_weights)  # substitueix pesos aleatoris per GloVe
+        if freeze_embeddings:
+            self.embed.weight.requires_grad = False  # GloVe frozen: els pesos no canvien durant train
         self.dropout = nn.Dropout(dropout)
         self.lstm = nn.LSTM(embed_size, hidden_size, num_layers, batch_first=True) # crea una capa LSTM que processa seqüències d'embeddings. input_size=embed_size (mida dels vectors d'embedding), hidden_size=mida de l'estat ocult, num_layers=número de capes apilades, batch_first=True significa que les dimensions d'entrada i sortida seran [B, T, ...] en lloc de [T, B, ...]
         self.linear = nn.Linear(hidden_size, vocab_size) # capa final que transforma cada estat ocult de la LSTM en una predicció de token de mida vocab_size.
