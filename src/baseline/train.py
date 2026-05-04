@@ -18,7 +18,7 @@ from torch.nn.utils.rnn import pack_padded_sequence # per treballar amb seqüèn
 
 from dataset import get_loaders # els dataloaders són objectes que donen batches amb imatges, captions i longituds.
 from model import DecoderRNN, EncoderCNN # les dues xarxes principals.
-from vocabulary import Vocabulary, build_vocab # construir vocabulari a partir de les captions.
+from vocabulary import Vocabulary, build_vocab, build_vocab_glove # construir vocabulari a partir de les captions.
 
 
 def parse_args(): # a llegir tots els arguments
@@ -34,6 +34,10 @@ def parse_args(): # a llegir tots els arguments
     p.add_argument("--num-layers", type=int, default=1) # nombre de capes apilades de la LSTM (profunditat)
     p.add_argument("--dropout", type=float, default=0.5) # probabilitat de dropout a la LSTM (regularització que apaga neurones aleatòriament durant l'entrenament per evitar overfitting)
     p.add_argument("--backbone", default="resnet50") # quina CNN preentrenada utilitzar com a encoder (resnet50 o resnet152)
+
+    # Opcions GloVe (si no s'especifiquen, s'usa vocabulari estàndard sense semàntica)
+    p.add_argument("--glove", default=None, help="Ruta al fitxer GloVe .txt (ex: glove.6B.300d.txt). Si no s'especifica, s'usa embedding estàndard.")
+    p.add_argument("--glove-dim", type=int, default=300, help="Dimensió dels vectors GloVe (50, 100, 200 o 300). Ha de coincidir amb el fitxer.")
 
     p.add_argument("--epochs", type=int, default=5) # numero de passades completes del train
     p.add_argument("--patience", type=int, default=5) # nombre d'epochs que esperarem sense millora en la val_loss abans de parar l'entrenament (early stopping)
@@ -51,13 +55,30 @@ def parse_args(): # a llegir tots els arguments
 
 def get_or_build_vocab(args) -> Vocabulary: # funció que retorna l'objecte Vocabulary
     vp = Path(args.vocab_path) # ruta del vocab
-    if vp.exists(): # si ja existeix el fitxer del vocab, el carrega i el retorna
+    if vp.exists(): # si ja existeix el fitxer del vocab, el carrega
         with open(vp, "rb") as f:
-            return pickle.load(f)
-    vocab = build_vocab(args.captions_csv, threshold=args.vocab_threshold) # si no existeix, el construeix a partir de les captions i threshold
+            vocab = pickle.load(f)
+        # Si s'ha demanat GloVe però el vocab carregat no en té, el reconstruïm
+        # (pot passar si primer es va fer un vocab estàndard i ara volem GloVe)
+        if args.glove and vocab.glove_embeddings is None:
+            print(f"[vocab] el vocab existent no té GloVe. Reconstruint amb GloVe...")
+        else:
+            return vocab # vocab ja és correcte, el retornem directament
+
+    # Construïm el vocabulari: estàndard o amb GloVe segons els arguments
+    if args.glove:
+        # OPCIÓ GloVe: cada paraula tindrà un vector semàntic preentrenat
+        # Nota: --embed-size s'ha d'igualar a --glove-dim perquè les dimensions concordin
+        vocab = build_vocab_glove(args.captions_csv, args.glove,
+                                  threshold=args.vocab_threshold,
+                                  glove_dim=args.glove_dim)
+    else:
+        # OPCIÓ estàndard: cada paraula rep un índex numèric sense semàntica
+        vocab = build_vocab(args.captions_csv, threshold=args.vocab_threshold)
+
     vp.parent.mkdir(parents=True, exist_ok=True)
     with open(vp, "wb") as f:
-        pickle.dump(vocab, f) # el guarda 
+        pickle.dump(vocab, f) # el guarda (inclou glove_embeddings si s'ha usat GloVe)
     print(f"[vocab] built and saved to {vp} (size={len(vocab)})")
     return vocab # i el retorna
 
@@ -99,7 +120,17 @@ def main():
     print(f"[data] train batches={len(train_loader)}  val batches={len(val_loader)}") # mira quants batches hi ha al train i a la validació
 
     encoder = EncoderCNN(args.embed_size, backbone=args.backbone).to(device) # crea l'encoder i l'envia a gpu (o cpu)
-    decoder = DecoderRNN(args.embed_size, args.hidden_size, len(vocab), args.num_layers, dropout=args.dropout).to(device) # crea decoder i envia
+
+    # Si s'ha construït un vocab amb GloVe, passem la matriu d'embeddings al decoder.
+    # El decoder inicialitzarà la seva capa Embedding amb vectors semàntics en lloc d'aleatoris.
+    glove_tensor = None
+    if vocab.glove_embeddings is not None:
+        glove_tensor = torch.tensor(vocab.glove_embeddings) # converteix la matriu numpy a tensor de PyTorch
+        print(f"[glove] embeddings carregats: {glove_tensor.shape}") # (vocab_size, glove_dim)
+
+    decoder = DecoderRNN(args.embed_size, args.hidden_size, len(vocab), args.num_layers,
+                         dropout=args.dropout,
+                         pretrained_embeddings=glove_tensor).to(device) # crea decoder i envia
 
     criterion = nn.CrossEntropyLoss() # crea la funció de pèrdua (CrossEntropyLoss quan multi-class). Les classes són paraules. si el vocabulari té 2982 paraules, el model escull entre 2982 classes.
     params = ( # llista de paràmetres que entrenarem
