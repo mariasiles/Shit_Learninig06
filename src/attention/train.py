@@ -246,7 +246,7 @@ def main():
             "vocab_size": len(vocab),
             "args": vars(args),
         }
-        out = Path(args.checkpoints_dir) / f"ckpt_epoch{epoch}.pt"
+        out = Path(args.checkpoints_dir) / "ckpt_last.pt" # sobreescriu l'últim per estalviar espai
         torch.save(ckpt, out)
         print(f"[ckpt] saved {out}")
 
