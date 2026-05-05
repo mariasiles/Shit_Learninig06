@@ -68,7 +68,7 @@ def parse_args(): # a llegir tots els arguments
     p.add_argument("--semantic-loss", action="store_true",
                    help="Activa la funció de pèrdua semàntica usant similitud d'embeddings.")
     p.add_argument("--wandb", action="store_true") # argument que activa wandb
-    p.add_argument("--wandb-project", default="learning6") # nom del projecte a wandb
+    p.add_argument("--wandb-project", default="image-captioning") # nom del projecte a wandb
     p.add_argument("--wandb-entity", default=None) # nom de l'entitat (usuari o organització) a wandb, si es deixa None s'utilitzarà l'entitat per defecte de l'usuari
     p.add_argument("--run-name", default=None) # nom l'execució concreta, si es deixa None s'utilitzarà un nom generat automàticament basat en la data i hora actual
     return p.parse_args()
