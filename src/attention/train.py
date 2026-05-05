@@ -60,7 +60,7 @@ def parse_args():
     p.add_argument("--semantic-temp", type=float, default=10.0,
                    help="Temperatura pels soft labels semàntics (amb --glove-path o --word2vec-path).")
     p.add_argument("--wandb", action="store_true")
-    p.add_argument("--wandb-project", default="image-captioning")
+    p.add_argument("--wandb-project", default="learning6")
     p.add_argument("--wandb-entity", default=None)
     p.add_argument("--run-name", default=None)
     return p.parse_args()
