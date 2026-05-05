@@ -24,6 +24,7 @@ from src.baseline.model import DecoderRNN, EncoderCNN # les dues xarxes principa
 from src.baseline.sample import caption_image  # per generar captions durant l'avaluació BLEU
 from src.shared.vocabulary import Vocabulary, build_vocab, simple_tokenize, load_glove_weights, load_word2vec_weights # vocabulari, tokenitzador, GloVe i Word2Vec
 from src.shared.losses import SemanticCrossEntropyLoss, build_soft_labels  # loss semàntica
+from src.shared.metrics import rouge_l_score # mètriques compartides
 
 
 def parse_args(): # a llegir tots els arguments
@@ -64,6 +65,8 @@ def parse_args(): # a llegir tots els arguments
     # --glove-path amb    --freeze-embeddings → GloVe frozen   (pesos GloVe fixos)
     # sense --glove-path                      → scratch        (pesos aleatoris, comportament original)
 
+    p.add_argument("--semantic-loss", action="store_true",
+                   help="Activa la funció de pèrdua semàntica usant similitud d'embeddings.")
     p.add_argument("--wandb", action="store_true") # argument que activa wandb
     p.add_argument("--wandb-project", default="learning6") # nom del projecte a wandb
     p.add_argument("--wandb-entity", default=None) # nom de l'entitat (usuari o organització) a wandb, si es deixa None s'utilitzarà l'entitat per defecte de l'usuari
@@ -101,9 +104,8 @@ def evaluate(encoder, decoder, loader, criterion, device) -> float:
         losses.append(loss.item()) # afageix la loss del batch a la llista
     return float(np.mean(losses)) # retorna la mitjana de totes les losses de validació
 
-
 @torch.no_grad()
-def evaluate_bleu_subset(encoder, decoder, vocab, device, captions_csv, images_dir, n_samples=50) -> tuple[float, float, float]:
+def evaluate_bleu_subset(encoder, decoder, vocab, device, captions_csv, images_dir, n_samples=50) -> tuple[float, float, float, float]:
     encoder.eval()
     decoder.eval()
     _, _, test_ids = split_image_ids(captions_csv)
@@ -113,17 +115,20 @@ def evaluate_bleu_subset(encoder, decoder, vocab, device, captions_csv, images_d
     
     all_refs, all_hyps = [], []
     all_meteors = []
+    all_rouges = []
     for img in sample_ids:
         refs = [simple_tokenize(c) for c in df_caps[df_caps["image"] == img]["caption"].tolist()]
         hyp = simple_tokenize(caption_image(f"{images_dir}/{img}", encoder, decoder, vocab, device))
         all_refs.append(refs)
         all_hyps.append(hyp)
         all_meteors.append(meteor_score(refs, hyp))
+        all_rouges.append(rouge_l_score(refs, hyp))
         
     b1 = corpus_bleu(all_refs, all_hyps, weights=(1,0,0,0))
     b4 = corpus_bleu(all_refs, all_hyps, weights=(.25,.25,.25,.25))
     m = float(np.mean(all_meteors))
-    return float(b1), float(b4), m
+    r = float(np.mean(all_rouges))
+    return float(b1), float(b4), m, r
 
 
 def main():
@@ -167,14 +172,14 @@ def main():
                          pretrained_weights=pretrained_weights,
                          freeze_embeddings=args.freeze_embeddings).to(device)
 
-    if pretrained_weights is not None:
+    if pretrained_weights is not None and args.semantic_loss:
         # Amb GloVe o Word2Vec: soft labels semàntics (paraules similars penalitzades menys)
         soft_lbls = build_soft_labels(decoder.embed.weight.data.cpu(), temperature=args.semantic_temp)
         criterion = SemanticCrossEntropyLoss(soft_lbls).to(device)
         print(f"[loss] SemanticCrossEntropy (temp={args.semantic_temp}) — soft labels des de {emb_type}")
     else:
         criterion = nn.CrossEntropyLoss()
-        print("[loss] CrossEntropyLoss estàndard (sense embeddings preentrenats)")
+        print("[loss] CrossEntropyLoss estàndard")
     params = ( # llista de paràmetres que entrenarem
         list(decoder.parameters()) # inclou tots els paràmetres del decoder
         + list(encoder.linear.parameters()) # inclou els de l'encoder (només s'entrenaven les capes linear i bn, les altres es congelaven)
@@ -208,8 +213,8 @@ def main():
 
             features = encoder(images) # passa les imatges per la CNN
             outputs = decoder(features, captions, lengths) # passa els embeddings de les imgs, les captions i les lenghts a la LSTM
-            # per cada token dona una distribució sobre el vocabulari
-            loss = criterion(outputs, targets) # calcula la Cross Entropy Loss comparant les prediccions del model amb les paraules correctes
+            
+            loss = criterion(outputs, targets) # calcula la pèrdua (CE o Semantic CE)
 
             # BACKPROPAGATION
             optimizer.zero_grad() # posa els gradients a zero (perquè no s'acumulin amb els antics)
@@ -232,12 +237,12 @@ def main():
         val_ppl = float(np.exp(min(val_loss, 20))) # perplexity de la validació
         
         # Avaluació ràpida de mètriques sobre un subconjunt (per no alentir la epoch)
-        val_b1, val_b4, val_m = evaluate_bleu_subset(encoder, decoder, vocab, device, args.captions_csv, args.images_dir, n_samples=50)
+        val_b1, val_b4, val_m, val_r = evaluate_bleu_subset(encoder, decoder, vocab, device, args.captions_csv, args.images_dir, n_samples=50)
 
         elapsed = time.time() - t0 # es tanca el temps per saber quan ha durat la epoch
-        print(f"== epoch {epoch} done  val_loss={val_loss:.4f}  val_ppl={val_ppl:.2f}  val_bleu4={val_b4:.3f}  ({elapsed:.0f}s)")
+        print(f"== epoch {epoch} done  val_loss={val_loss:.4f}  val_ppl={val_ppl:.2f}  val_bleu4={val_b4:.3f}  val_rouge={val_r:.3f} ({elapsed:.0f}s)")
         if use_wandb:
-            wandb.log({"val/loss": val_loss, "val/perplexity": val_ppl, "val/bleu1": val_b1, "val/bleu4": val_b4, "val/meteor": val_m, "epoch": epoch,
+            wandb.log({"val/loss": val_loss, "val/perplexity": val_ppl, "val/bleu1": val_b1, "val/bleu4": val_b4, "val/meteor": val_m, "val/rouge": val_r, "epoch": epoch,
                        "lr": optimizer.param_groups[0]["lr"]}) # registra metriques a wandb
 
         ckpt = { # diccionari amb la info que es vol guardar
