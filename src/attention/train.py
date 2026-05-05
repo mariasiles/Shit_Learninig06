@@ -97,6 +97,30 @@ def evaluate(encoder, decoder, loader, criterion, device) -> float:
     return float(np.mean(losses))
 
 
+@torch.no_grad()
+def evaluate_bleu_subset(encoder, decoder, vocab, device, captions_csv, images_dir, n_samples=50) -> tuple[float, float, float]:
+    encoder.eval()
+    decoder.eval()
+    _, _, test_ids = split_image_ids(captions_csv)
+    df_caps = load_captions_df(captions_csv)
+    
+    sample_ids = test_ids[:n_samples]
+    
+    all_refs, all_hyps = [], []
+    all_meteors = []
+    for img in sample_ids:
+        refs = [simple_tokenize(c) for c in df_caps[df_caps["image"] == img]["caption"].tolist()]
+        hyp = simple_tokenize(caption_image(f"{images_dir}/{img}", encoder, decoder, vocab, device))
+        all_refs.append(refs)
+        all_hyps.append(hyp)
+        all_meteors.append(meteor_score(refs, hyp))
+        
+    b1 = corpus_bleu(all_refs, all_hyps, weights=(1,0,0,0))
+    b4 = corpus_bleu(all_refs, all_hyps, weights=(.25,.25,.25,.25))
+    m = float(np.mean(all_meteors))
+    return float(b1), float(b4), m
+
+
 def main():
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -205,10 +229,14 @@ def main():
         val_losses.append(val_loss)
         scheduler.step(val_loss)
         val_ppl = float(np.exp(min(val_loss, 20)))
+        
+        # Avaluació ràpida de mètriques sobre un subconjunt (per no alentir la epoch)
+        val_b1, val_b4, val_m = evaluate_bleu_subset(encoder, decoder, vocab, device, args.captions_csv, args.images_dir, n_samples=50)
+
         elapsed = time.time() - t0
-        print(f"== epoch {epoch} done  val_loss={val_loss:.4f}  val_ppl={val_ppl:.2f}  ({elapsed:.0f}s)")
+        print(f"== epoch {epoch} done  val_loss={val_loss:.4f}  val_ppl={val_ppl:.2f}  val_bleu4={val_b4:.3f}  ({elapsed:.0f}s)")
         if use_wandb:
-            wandb.log({"val/loss": val_loss, "val/perplexity": val_ppl, "epoch": epoch,
+            wandb.log({"val/loss": val_loss, "val/perplexity": val_ppl, "val/bleu1": val_b1, "val/bleu4": val_b4, "val/meteor": val_m, "epoch": epoch,
                        "lr": optimizer.param_groups[0]["lr"]})
 
         ckpt = {
