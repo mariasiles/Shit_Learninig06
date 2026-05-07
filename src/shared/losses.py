@@ -22,10 +22,10 @@ def build_soft_labels(embed_weights: torch.Tensor, temperature: float = 10.0) ->
     Returns:
         soft_labels [vocab_size, vocab_size] — cada fila és una distribució de prob.
     """
-    norms = embed_weights.norm(dim=1, keepdim=True).clamp(min=1e-8)
-    normalized = embed_weights / norms                    # [vocab_size, embed_dim]
-    sim = normalized @ normalized.T                       # [vocab_size, vocab_size]
-    return torch.softmax(sim * temperature, dim=1)        # [vocab_size, vocab_size]
+    norms = embed_weights.norm(dim=1, keepdim=True).clamp(min=1e-8)  # norma L2 de cada vector d'embedding, clampejada per evitar divisió per zero
+    normalized = embed_weights / norms                    # normalitza cada vector → vectors unitaris per calcular similitud cosinus
+    sim = normalized @ normalized.T                       # producte matricial → [vocab_size, vocab_size] on sim[i,j] = cosinus entre paraula i i paraula j
+    return torch.softmax(sim * temperature, dim=1)        # aplica softmax amb temperatura → cada fila és una distribució de prob sobre el vocabulari
 
 
 class SemanticCrossEntropyLoss(nn.Module):
@@ -37,11 +37,11 @@ class SemanticCrossEntropyLoss(nn.Module):
 
     def __init__(self, soft_labels: torch.Tensor):
         super().__init__()
-        self.register_buffer("soft_labels", soft_labels)
+        self.register_buffer("soft_labels", soft_labels)  # registra com a buffer → es guarda al checkpoint però no és un paràmetre entrenable
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        # logits:  [N, vocab_size]
-        # targets: [N]  (índexs de les paraules target)
-        log_probs = torch.log_softmax(logits, dim=1)      # [N, vocab_size]
-        soft_tgts = self.soft_labels[targets]              # [N, vocab_size]
-        return -(soft_tgts * log_probs).sum(dim=1).mean()  # escalar
+        # logits:  [N, vocab_size] → puntuacions crues del model per a cada paraula del vocabulari
+        # targets: [N]  → índexs de les paraules target (la paraula correcta de cada pas)
+        log_probs = torch.log_softmax(logits, dim=1)      # converteix logits a log-probabilitats → [N, vocab_size]
+        soft_tgts = self.soft_labels[targets]              # agafa la fila de soft labels corresponent a cada target → [N, vocab_size]
+        return -(soft_tgts * log_probs).sum(dim=1).mean()  # cross-entropy generalitzada: -sum(soft_target * log_prob) → escalar
