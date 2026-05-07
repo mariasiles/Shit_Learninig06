@@ -21,11 +21,15 @@ class EncoderCNNAttention(nn.Module):
     def __init__(self, backbone: str = "resnet50"):
         super().__init__()
         if backbone == "resnet50":
-            weights = models.ResNet50_Weights.IMAGENET1K_V2
-            net = models.resnet50(weights=weights)       # carrega ResNet-50 preentrenada
+            try:
+                net = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
+            except AttributeError:
+                net = models.resnet50(pretrained=True)
         elif backbone == "resnet152":
-            weights = models.ResNet152_Weights.IMAGENET1K_V2
-            net = models.resnet152(weights=weights)
+            try:
+                net = models.resnet152(weights=models.ResNet152_Weights.IMAGENET1K_V2)
+            except AttributeError:
+                net = models.resnet152(pretrained=True)
         else:
             raise ValueError(f"Unsupported backbone: {backbone}")
 
@@ -39,13 +43,19 @@ class EncoderCNNAttention(nn.Module):
 
         for p in self.cnn.parameters():
             p.requires_grad = False  # congela la CNN, no entrena els seus pesos
+        self.finetuning = False  # quan True, layer4 rep gradients
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        with torch.no_grad():           # no calcula gradients (CNN congelada)
-            out = self.cnn(images)            # [B, 2048, 7, 7] → mapa de 7x7 regions
-        B, C, H, W = out.shape          # desempaqueta dimensions
-        out = out.permute(0, 2, 3, 1)         # [B, 7, 7, 2048] → mou canals al final
-        return out.view(B, H * W, C)          # [B, 49, 2048] → aplana la graella 7x7 en 49 regions
+        if self.finetuning:
+            with torch.no_grad():
+                out = self.cnn[:-1](images)  # totes les capes menys layer4 [B, 1024, 14, 14]
+            out = self.cnn[-1](out)          # layer4 amb gradients [B, 2048, 7, 7]
+        else:
+            with torch.no_grad():
+                out = self.cnn(images)       # CNN completament congelada [B, 2048, 7, 7]
+        B, C, H, W = out.shape
+        out = out.permute(0, 2, 3, 1)
+        return out.view(B, H * W, C)         # [B, 49, 2048]
         # cada imatge queda representada per 49 vectors de 2048 dimensions
         # cada vector = una regió de la imatge
 
@@ -146,38 +156,32 @@ class AttentionDecoder(nn.Module):
         # captions:    [B, T] tokens (inclou <start>)
         # lengths:     longitud real de cada caption
         B = encoder_out.size(0)
+        num_pixels = encoder_out.size(1)
         embeddings = self.dropout(self.embed(captions))   # [B, T, embed_size]
-        h, c = self._init_hidden(encoder_out)  # inicialitza LSTM amb info de la imatge
+        h, c = self._init_hidden(encoder_out)
 
         decode_lengths = [l - 1 for l in lengths]
-        # -1 perquè no cal predir res després de <end>
-        max_t = max(decode_lengths)  # màxim de passos a fer
+        max_t = max(decode_lengths)
+
+        # Acumula els pesos d'atenció per a la Doubly Stochastic regularització
+        alphas_sum = torch.zeros(B, num_pixels, device=encoder_out.device)
 
         preds = []
         for t in range(max_t):
             bt = sum(1 for l in decode_lengths if l > t)
-            # bt = quantes captions encara no han acabat en el pas t
-            # (les captions estan ordenades de més llarga a més curta)
-            context, _ = self.attention(encoder_out[:bt], h[:bt])
-            # calcula el context d'atenció per les bt captions actives → [bt, 2048]
+            context, alpha = self.attention(encoder_out[:bt], h[:bt])  # alpha: [bt, num_pixels]
+            alphas_sum[:bt] = alphas_sum[:bt] + alpha  # suma sobre el temps
             lstm_in = torch.cat([embeddings[:bt, t], context], dim=1)
-            # concatena embedding de la paraula actual + context de la imatge
-            # [bt, 256] + [bt, 2048] → [bt, 2304]
             h_new, c_new = self.lstm_cell(lstm_in, (h[:bt], c[:bt]))
-            # un pas de la LSTM → nous estats h i c [bt, 512]
-            preds.append(self.fc(self.dropout(h_new)))    # [bt, vocab_size]
-            # dropout + capa lineal → predicció de la següent paraula
+            preds.append(self.fc(self.dropout(h_new)))
             if bt < B:
                 h = torch.cat([h_new, h[bt:]], dim=0)
                 c = torch.cat([c_new, c[bt:]], dim=0)
-                # actualitza h i c: les captions actives amb el nou estat,
-                # les que ja han acabat mantenen l'estat anterior
             else:
                 h, c = h_new, c_new
 
-        # Concatenation order matches pack_padded_sequence output layout
-        return torch.cat(preds, dim=0)
-        # concatena totes les prediccions → [sum(lengths-1), 2982]
+        # Retorna prediccions + alphas acumulades (per a Doubly Stochastic loss)
+        return torch.cat(preds, dim=0), alphas_sum
 
     @torch.no_grad()
     def beam_search(
@@ -258,3 +262,152 @@ class AttentionDecoder(nn.Module):
         best = max(range(len(complete_scores)), key=lambda i: complete_scores[i])
         return complete_seqs[best]
         # retorna la seqüència amb la puntuació (log-prob) més alta
+
+    def sample_batch_with_logprobs(
+        self,
+        encoder_out: torch.Tensor,
+        start_idx: int,
+        end_idx: int,
+        max_len: int = 20,
+    ):
+        """Batched multinomial sampling for SCST — processes all B images in parallel.
+
+        Returns (list[list[int]], list[Tensor]) — tokens and log_probs per image.
+        log_probs retain the computation graph for REINFORCE.
+        """
+        B = encoder_out.size(0)
+        device = encoder_out.device
+        h, c = self._init_hidden(encoder_out)                  # [B, hidden_size]
+        word = torch.full((B,), start_idx, dtype=torch.long, device=device)
+
+        alive = torch.ones(B, dtype=torch.bool, device=device)
+        tokens_per: list[list[int]] = [[] for _ in range(B)]
+        lp_per:     list[list] = [[] for _ in range(B)]
+
+        for _ in range(max_len):
+            emb = self.embed(word)                             # [B, embed]
+            context, _ = self.attention(encoder_out, h)       # [B, enc_dim]
+            h, c = self.lstm_cell(torch.cat([emb, context], 1), (h, c))
+            log_prob_dist = torch.log_softmax(self.fc(self.dropout(h)), 1)  # [B, V]
+            word = torch.multinomial(log_prob_dist.exp(), 1).squeeze(1)     # [B]
+
+            for i in range(B):
+                if not alive[i]:
+                    continue
+                tok = word[i].item()
+                if tok == end_idx:
+                    alive[i] = False
+                else:
+                    tokens_per[i].append(tok)
+                    lp_per[i].append(log_prob_dist[i, tok])
+
+            if not alive.any():
+                break
+
+        log_probs_out = [
+            torch.stack(lp) if lp else torch.zeros(1, device=device)
+            for lp in lp_per
+        ]
+        return tokens_per, log_probs_out
+
+    @torch.no_grad()
+    def greedy_batch(
+        self,
+        encoder_out: torch.Tensor,
+        start_idx: int,
+        end_idx: int,
+        max_len: int = 20,
+    ) -> list[list[int]]:
+        """Batched greedy decode — SCST baseline, no gradients."""
+        B = encoder_out.size(0)
+        device = encoder_out.device
+        h, c = self._init_hidden(encoder_out)
+        word = torch.full((B,), start_idx, dtype=torch.long, device=device)
+
+        alive = torch.ones(B, dtype=torch.bool, device=device)
+        tokens_per: list[list[int]] = [[] for _ in range(B)]
+
+        for _ in range(max_len):
+            emb = self.embed(word)
+            context, _ = self.attention(encoder_out, h)
+            h, c = self.lstm_cell(torch.cat([emb, context], 1), (h, c))
+            word = self.fc(h).argmax(1)                        # [B]
+
+            for i in range(B):
+                if not alive[i]:
+                    continue
+                tok = word[i].item()
+                if tok == end_idx:
+                    alive[i] = False
+                else:
+                    tokens_per[i].append(tok)
+
+            if not alive.any():
+                break
+
+        return tokens_per
+
+"""
+📷 IMAGEN
+[B, 3, H, W]
+   ↓
+🧱 CNN (ResNet-50/152 preentrenada, congelada)
+   ↓
+[B, 2048, 7, 7]
+   ↓ reshape
+[B, 49, 2048]
+   ↓
+49 regiones visuales (cada una = vector 2048)
+
+   ↓
+👀 ATTENTION (Bahdanau)
+
+INPUT:
+encoder_out [B, 49, 2048]
+h_lstm      [B, 512]
+
+→ proyección:
+2048 → 256
+512  → 256
+
+→ score por región:
+[B, 49, 1] → squeeze → [B, 49]
+
+→ softmax:
+alpha [B, 49]  (pesos que suman 1)
+
+→ contexto:
+weighted sum sobre regiones
+context = [B, 2048]
+
+   ↓
+🧾 EMBEDDING PALABRA
+token → [B]
+→ embedding lookup
+→ [B, 256]
+
+   ↓
+🔁 FUSIÓN
+concat:
+embedding [B, 256] + context [B, 2048]
+→ [B, 2304]
+
+   ↓
+🧠 LSTM DECODER
+LSTMCell:
+input [B, 2304]
+hidden → [B, 512]
+
+   ↓
+📚 OUTPUT VOCABULARIO
+Linear:
+[B, 512] → [B, vocab_size] (≈10000)
+
+   ↓
+Softmax:
+probabilidades de palabras
+
+   ↓
+📝 PALABRA SIGUIENTE
+
+(repetir autoregresivamente hasta <end>)"""
