@@ -36,6 +36,16 @@ def caption_image(image_path: str, encoder, decoder, vocab, device) -> str:
     return vocab.decode(ids) # tradueix la llista d'ids a text
 
 
+@torch.no_grad()
+def caption_pil_image(pil_img, encoder, decoder, vocab, device) -> str:
+    """Com caption_image però rep un PIL.Image directament (per al dataset HuggingFace)."""
+    tfm = get_transform(train=False)
+    x = tfm(pil_img.convert("RGB")).unsqueeze(0).to(device)
+    feat = encoder(x)
+    ids = decoder.sample(feat).cpu().numpy()[0].tolist()
+    return vocab.decode(ids)
+
+
 def main():
     p = argparse.ArgumentParser() # arguments
     p.add_argument("--image", required=True) # paht de la imarge que vols captionar
