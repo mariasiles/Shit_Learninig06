@@ -47,6 +47,21 @@ def caption_image(image_path: str, encoder, decoder, vocab, device, beam_size: i
     return vocab.decode(ids, skip_special=False)
 
 
+@torch.no_grad()
+def caption_pil_image(pil_img, encoder, decoder, vocab, device, beam_size: int = 3) -> str:
+    """Com caption_image però rep un PIL.Image directament (per al dataset HuggingFace)."""
+    tfm = get_transform(train=False)
+    x = tfm(pil_img.convert("RGB")).unsqueeze(0).to(device)
+    features = encoder(x)
+    ids = decoder.beam_search(
+        features,
+        start_idx=vocab.word2idx["<start>"],
+        end_idx=vocab.word2idx["<end>"],
+        beam_size=beam_size,
+    )
+    return vocab.decode(ids, skip_special=False)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--image", required=True)
