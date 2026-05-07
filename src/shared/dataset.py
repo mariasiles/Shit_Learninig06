@@ -6,9 +6,12 @@ Expected folder structure::
         Images/         # all .jpg files
         captions.txt    # CSV: image,caption
 
-    Flickr30k:
+    Flickr30k (CSV):
         flickr30k_images/   # all .jpg files
         results.csv         # CSV: image_name| comment_number| comment
+
+    Flickr30k (HuggingFace):
+        load_dataset('nlphuji/flickr30k', cache_dir=...) — imatges ja incloses
 """
 from __future__ import annotations # per anotacions modernes com: list[str]
 
@@ -91,11 +94,13 @@ class Flickr8kDataset(Dataset):
         vocab: Vocabulary,
         transform=None,
         image_ids: list[str] | None = None,
+        return_image_id: bool = False,
     ):
         self.images_dir = Path(images_dir)
         self.vocab = vocab
         self.transform = transform if transform is not None else get_transform(train=False)
         # si no s'especifica cap transformació, per defecte no fa random crop ni flip, només les necessaries per la ResNet
+        self.return_image_id = return_image_id
 
         df = load_captions_df(captions_csv)  # llegeix i normalitza Flickr8k o Flickr30k
         if image_ids is not None:
@@ -114,6 +119,8 @@ class Flickr8kDataset(Dataset):
         image = self.transform(image) # aplica les transformacions. Ara tenim un tensor amb shape [3, 224, 224]
 
         ids = self.vocab.encode(caption, add_special=True) # converteix la caption a llista d'enters segons el vocabulari
+        if self.return_image_id:
+            return image, torch.tensor(ids, dtype=torch.long), img_name
         return image, torch.tensor(ids, dtype=torch.long) # retorna la imatge (en format tensor) i la caption en format tensor([1, 4, 27, 83, 2])
                                             # torch.long perquè les capes d'embedding esperen tensors de tipus long
 
@@ -135,6 +142,40 @@ def collate_fn(batch):
     for i, c in enumerate(caps):
         targets[i, : lengths[i]] = c # omple cada fila de targets amb els ids de la caption.
     return images, targets, lengths
+
+
+def collate_fn_scst(batch):
+    """Like collate_fn but each sample is (image, caption, img_id). Returns img_ids too."""
+    batch.sort(key=lambda x: len(x[1]), reverse=True)
+    images, caps, img_ids = zip(*batch)
+    images = torch.stack(images, dim=0)
+    lengths = [len(c) for c in caps]
+    targets = torch.zeros(len(caps), max(lengths), dtype=torch.long)
+    for i, c in enumerate(caps):
+        targets[i, :lengths[i]] = c
+    return images, targets, lengths, list(img_ids)
+
+
+def get_scst_loader(
+    images_dir: str | Path,
+    captions_csv: str | Path,
+    vocab: Vocabulary,
+    train_ids: list[str],
+    batch_size: int = 16,
+    num_workers: int = 2,
+    image_size: int = 224,
+) -> DataLoader:
+    """DataLoader for SCST training — returns (images, captions, lengths, img_ids)."""
+    ds = Flickr8kDataset(
+        images_dir, captions_csv, vocab,
+        transform=get_transform(image_size, train=True),
+        image_ids=train_ids,
+        return_image_id=True,
+    )
+    return DataLoader(
+        ds, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, collate_fn=collate_fn_scst, pin_memory=True,
+    )
 
 
 def split_image_ids(captions_csv: str | Path, val_size: int = 1000, test_size: int = 1000, seed: int = 42):
@@ -171,7 +212,7 @@ def get_loaders(
     test_ds = Flickr8kDataset(images_dir, captions_csv, vocab,
                               transform=get_transform(image_size, train=False),
                               image_ids=test_ids)
-    # DataLoaders són iteradors que donen batches. Donem els datasets, la funció collate_fn per preparar els batches (pad de captions i ordenar per longitud), i altres paràmetres. 
+    # DataLoaders són iteradors que donen batches. Donem els datasets, la funció collate_fn per preparar els batches (pad de captions i ordenar per longitud), i altres paràmetres.
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, # al train barrejem les mostres però al val i al test no cal.
                               num_workers=num_workers, collate_fn=collate_fn, pin_memory=True) # pin_memory=True fa que els tensors es carreguin directament a la GPU (si està disponible) en lloc de passar per la RAM, per accelerar l'entrenament
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
@@ -185,3 +226,113 @@ def get_loaders(
 # 1. split_image_ids() fa la divisió de les imatges en train/val/test
 # 2. crear datasets Flickr8kDataset per cada split --> donen les mostres (imatge_tensor, caption_ids_tensor)
 # 3. crear DataLoaders per cada split --> donen batches preparats (images_tensor, captions_tensor, lengths) on captions_tensor està paddejat i ordenat per longitud
+
+
+# ════════════════════════════════════════════════════════
+# FLICKR30K — HuggingFace (nlphuji/flickr30k)
+# ════════════════════════════════════════════════════════
+
+class Flickr30kHFDataset(Dataset):
+    """Dataset que llegeix Flickr30k des del format HuggingFace (nlphuji/flickr30k).
+
+    El dataset HF té 31014 files, cadascuna amb una imatge PIL i una llista de
+    5 captions. Aquesta classe expandeix cada fila en 5 mostres individuals
+    (una per caption), igual que fa Flickr8kDataset amb el CSV.
+
+    Args:
+        hf_split:   el split HF filtrat per 'train'/'val'/'test' (ja filtrat)
+        vocab:      vocabulari Vocabulary
+        transform:  transformació de torchvision (get_transform())
+        return_image_id: si True, retorna també el filename de la imatge
+    """
+
+    def __init__(
+        self,
+        hf_split,
+        vocab: Vocabulary,
+        transform=None,
+        return_image_id: bool = False,
+    ):
+        self.vocab = vocab
+        self.transform = transform if transform is not None else get_transform(train=False)
+        self.return_image_id = return_image_id
+
+        # Expandeix: cada imatge té 5 captions → creem un índex pla (img_idx, cap_idx)
+        self.samples: list[tuple[int, int]] = []
+        self.hf_data = hf_split
+        for img_idx in range(len(hf_split)):
+            n_caps = len(hf_split[img_idx]["caption"])
+            for cap_idx in range(n_caps):
+                self.samples.append((img_idx, cap_idx))
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int):
+        img_idx, cap_idx = self.samples[idx]
+        row = self.hf_data[img_idx]
+
+        image = row["image"].convert("RGB")      # PIL Image ja carregada pel HF dataset
+        image = self.transform(image)            # [3, 224, 224]
+
+        caption = row["caption"][cap_idx]
+        ids = self.vocab.encode(caption, add_special=True)
+
+        if self.return_image_id:
+            return image, torch.tensor(ids, dtype=torch.long), row["filename"]
+        return image, torch.tensor(ids, dtype=torch.long)
+
+
+def get_loaders_hf(
+    hf_dataset,
+    vocab: Vocabulary,
+    batch_size: int = 32,
+    num_workers: int = 2,
+    image_size: int = 224,
+):
+    """Crea DataLoaders per Flickr30k des del dataset HuggingFace.
+
+    Args:
+        hf_dataset: resultat de load_dataset('nlphuji/flickr30k', ...) → conté la clau 'test'
+                    (el dataset HF posa tot en un únic split 'test'; el camp 'split' indica
+                    'train'/'val'/'test' de Karpathy)
+        vocab:      vocabulari Vocabulary ja construït
+
+    Returns:
+        train_loader, val_loader, test_loader
+    """
+    full = hf_dataset["test"]  # totes les 31014 imatges
+
+    # Filtra per split de Karpathy (camp 'split' dins cada fila)
+    train_hf = full.filter(lambda x: x["split"] == "train")
+    val_hf   = full.filter(lambda x: x["split"] == "val")
+    test_hf  = full.filter(lambda x: x["split"] == "test")
+
+    train_ds = Flickr30kHFDataset(train_hf, vocab, get_transform(image_size, train=True))
+    val_ds   = Flickr30kHFDataset(val_hf,   vocab, get_transform(image_size, train=False))
+    test_ds  = Flickr30kHFDataset(test_hf,  vocab, get_transform(image_size, train=False))
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                              num_workers=num_workers, collate_fn=collate_fn, pin_memory=True)
+    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
+                              num_workers=num_workers, collate_fn=collate_fn, pin_memory=True)
+    test_loader  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False,
+                              num_workers=num_workers, collate_fn=collate_fn, pin_memory=True)
+
+    return train_loader, val_loader, test_loader
+
+
+def get_scst_loader_hf(
+    hf_dataset,
+    vocab: Vocabulary,
+    batch_size: int = 16,
+    num_workers: int = 2,
+    image_size: int = 224,
+) -> DataLoader:
+    """DataLoader SCST per Flickr30k HF — retorna (images, captions, lengths, img_ids)."""
+    full = hf_dataset["test"]
+    train_hf = full.filter(lambda x: x["split"] == "train")
+    ds = Flickr30kHFDataset(train_hf, vocab, get_transform(image_size, train=True),
+                            return_image_id=True)
+    return DataLoader(ds, batch_size=batch_size, shuffle=True,
+                      num_workers=num_workers, collate_fn=collate_fn_scst, pin_memory=True)
