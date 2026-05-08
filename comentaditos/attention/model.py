@@ -563,3 +563,153 @@ class AttentionDecoder(nn.Module):
         # Entre tots els camins complets, retornem el de puntuació (log-prob) màxima.
         best = max(range(len(complete_scores)), key=lambda i: complete_scores[i])
         return complete_seqs[best]
+
+
+    def sample_batch_with_logprobs(
+        self,
+        encoder_out: torch.Tensor,
+        start_idx: int,
+        end_idx: int,
+        max_len: int = 20,
+    ):
+        """Batched multinomial sampling for SCST — processes all B images in parallel.
+
+        Returns (list[list[int]], list[Tensor]) — tokens and log_probs per image.
+        log_probs retain the computation graph for REINFORCE.
+        """
+        B = encoder_out.size(0)
+        device = encoder_out.device
+        h, c = self._init_hidden(encoder_out)                  # [B, hidden_size]
+        word = torch.full((B,), start_idx, dtype=torch.long, device=device)
+
+        alive = torch.ones(B, dtype=torch.bool, device=device)
+        tokens_per: list[list[int]] = [[] for _ in range(B)]
+        lp_per:     list[list] = [[] for _ in range(B)]
+
+        for _ in range(max_len):
+            emb = self.embed(word)                             # [B, embed]
+            context, _ = self.attention(encoder_out, h)       # [B, enc_dim]
+            h, c = self.lstm_cell(torch.cat([emb, context], 1), (h, c))
+            log_prob_dist = torch.log_softmax(self.fc(self.dropout(h)), 1)  # [B, V]
+            word = torch.multinomial(log_prob_dist.exp(), 1).squeeze(1)     # [B]
+
+            for i in range(B):
+                if not alive[i]:
+                    continue
+                tok = word[i].item()
+                if tok == end_idx:
+                    alive[i] = False
+                else:
+                    tokens_per[i].append(tok)
+                    lp_per[i].append(log_prob_dist[i, tok])
+
+            if not alive.any():
+                break
+
+        log_probs_out = [
+            torch.stack(lp) if lp else torch.zeros(1, device=device)
+            for lp in lp_per
+        ]
+        return tokens_per, log_probs_out
+
+    @torch.no_grad()
+    def greedy_batch(
+        self,
+        encoder_out: torch.Tensor,
+        start_idx: int,
+        end_idx: int,
+        max_len: int = 20,
+    ) -> list[list[int]]:
+        """Batched greedy decode — SCST baseline, no gradients."""
+        B = encoder_out.size(0)
+        device = encoder_out.device
+        h, c = self._init_hidden(encoder_out)
+        word = torch.full((B,), start_idx, dtype=torch.long, device=device)
+
+        alive = torch.ones(B, dtype=torch.bool, device=device)
+        tokens_per: list[list[int]] = [[] for _ in range(B)]
+
+        for _ in range(max_len):
+            emb = self.embed(word)
+            context, _ = self.attention(encoder_out, h)
+            h, c = self.lstm_cell(torch.cat([emb, context], 1), (h, c))
+            word = self.fc(h).argmax(1)                        # [B]
+
+            for i in range(B):
+                if not alive[i]:
+                    continue
+                tok = word[i].item()
+                if tok == end_idx:
+                    alive[i] = False
+                else:
+                    tokens_per[i].append(tok)
+
+            if not alive.any():
+                break
+
+        return tokens_per
+
+"""
+📷 IMAGEN
+[B, 3, H, W]
+   ↓
+🧱 CNN (ResNet-50/152 preentrenada, congelada)
+   ↓
+[B, 2048, 7, 7]
+   ↓ reshape
+[B, 49, 2048]
+   ↓
+49 regiones visuales (cada una = vector 2048)
+
+   ↓
+👀 ATTENTION (Bahdanau)
+
+INPUT:
+encoder_out [B, 49, 2048]
+h_lstm      [B, 512]
+
+→ proyección:
+2048 → 256
+512  → 256
+
+→ score por región:
+[B, 49, 1] → squeeze → [B, 49]
+
+→ softmax:
+alpha [B, 49]  (pesos que suman 1)
+
+→ contexto:
+weighted sum sobre regiones
+context = [B, 2048]
+
+   ↓
+🧾 EMBEDDING PALABRA
+token → [B]
+→ embedding lookup
+→ [B, 256]
+
+   ↓
+🔁 FUSIÓN
+concat:
+embedding [B, 256] + context [B, 2048]
+→ [B, 2304]
+
+   ↓
+🧠 LSTM DECODER
+LSTMCell:
+input [B, 2304]
+hidden → [B, 512]
+
+   ↓
+📚 OUTPUT VOCABULARIO
+Linear:
+[B, 512] → [B, vocab_size] (≈10000)
+
+   ↓
+Softmax:
+probabilidades de palabras
+
+   ↓
+📝 PALABRA SIGUIENTE
+
+(repetir autoregresivamente hasta <end>)"""
